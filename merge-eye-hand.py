@@ -2,6 +2,7 @@
 =======================================================
 • Eye tracking: MediaPipe FaceMesh iris → 2‑D quadratic mapping (16‑point grid).
 • Hand tracking: MediaPipe Hands detects thumb‑index pinch → triggers PYAutoGUI click.
+• NEW: full hand skeleton ("web") rendered on the webcam preview.
 • Press **R** to recalibrate gaze, **Q** to quit.
 
 Dependencies
@@ -26,6 +27,8 @@ COOLDOWN_FRAMES    = 6       # frames to ignore after a click
 
 mp_face_mesh = mp.solutions.face_mesh
 mp_hands     = mp.solutions.hands
+mp_drawing   = mp.solutions.drawing_utils
+mp_styles    = mp.solutions.drawing_styles
 
 # ---------------------------------------------------------------------------
 # Polynomial mapping helpers (2‑D quadratic → 6 parameters each axis)
@@ -122,17 +125,28 @@ class EyeHandMouse:
                         self.sy_filt = SMOOTH_ALPHA*sy + (1-SMOOTH_ALPHA)*self.sy_filt
                     pyautogui.moveTo(self.sx_filt, self.sy_filt, _pause=False)
 
-            # ---- pinch detection --------------------------------------
+            # ---- hand drawing & pinch detection ------------------------
             if self.cooldown > 0:
                 self.cooldown -= 1
-            if hands_res.multi_hand_landmarks and self.cooldown==0:
+
+            if hands_res.multi_hand_landmarks:
+                for hand_landmarks in hands_res.multi_hand_landmarks:
+                    # draw the full hand "web"
+                    mp_drawing.draw_landmarks(
+                        frame,
+                        hand_landmarks,
+                        mp_hands.HAND_CONNECTIONS,
+                        mp_styles.get_default_hand_landmarks_style(),
+                        mp_styles.get_default_hand_connections_style())
+
+                # pinch check on the first detected hand
                 hand = hands_res.multi_hand_landmarks[0]
                 l4 = hand.landmark[4]; l8 = hand.landmark[8]
                 dist = math.hypot((l4.x-l8.x)*w, (l4.y-l8.y)*h)
-                if dist < PINCH_THRESHOLD_PX:
+                if dist < PINCH_THRESHOLD_PX and self.cooldown==0:
                     pyautogui.click()
                     self.cooldown = COOLDOWN_FRAMES
-                    cv2.circle(frame, (int(l8.x*w), int(l8.y*h)), 15, (0,0,255), 2)
+                    cv2.circle(frame, (int(l8.x*w), int(l8.y*h)), 20, (0,0,255), 2)
 
             # ---- draw calibration dot ---------------------------------
             if self.theta is None and self.idx < len(self.targets):
