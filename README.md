@@ -2,6 +2,8 @@
 
 you must have python 3.12 version!
 ```
+(base) ➜  ~ source eye-mouse-env/bin/activate
+
 ((eye-mouse-env) ) (base) ➜  ~ python -V          # --> Python 3.12.x (arm64)
 Python 3.12.11
 
@@ -19,4 +21,6 @@ Python : 3.12.11 (main, Jun  3 2025, 15:41:47) [Clang 17.0.0 (clang-1700.0.13.3)
 OpenCV : 4.11.0
 MediaPipe : 0.10.21
 PyAutoGUI : 0.9.54
+
+((eye-mouse-env) ) (base) ➜  ~ python merge-eye-hand.py
 ```
