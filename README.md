@@ -4,7 +4,9 @@ you must have python 3.12 version!
 ```
 ((eye-mouse-env) ) (base) ➜  ~ python -V          # --> Python 3.12.x (arm64)
 Python 3.12.11
+
 ((eye-mouse-env) ) (base) ➜  ~ pip install opencv-python mediapipe==0.10.21 pyautogui
+
 ((eye-mouse-env) ) (base) ➜  ~ python - <<'PY'
 import sys, cv2, mediapipe as mp, pyautogui
 print("Python :", sys.version)
