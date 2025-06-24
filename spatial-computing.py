@@ -1,11 +1,13 @@
 """Eye‑controlled mouse + hand‑pinch click & scroll (MediaPipe)
 ================================================================
 • Eye tracking: MediaPipe FaceMesh iris → 2‑D quadratic mapping (16‑point grid).
-• Hand tracking: MediaPipe Hands detects thumb‑index **pinch** →
-    – **Click** once on pinch start.
-    – **Scroll** page while pinched: move hand up (scroll up) or down (scroll down).
+• Hand tracking: MediaPipe Hands detects thumb‑index **pinch**:
+    – **Single pinch** → mouse **click**.
+    – **Pinch‑hold + hand move** → page **scroll** (now gentler).
+    – **Double‑pinch** (two pinches within 0.4 s) → **toggle control** (pause / resume eye‑mouse);
+      use this to hand control back to your normal mouse/trackpad.
 • NEW: full hand skeleton ("web") rendered on the webcam preview.
-• **Re‑calibrate gaze**: press **⌘ Command** (macOS) — or **R** as a fallback — at any time.
+• **Re‑calibrate gaze**: press **⌘ Command** (macOS) — or **R** as a fallback.
 • Press **Q** to quit.
 
 Dependencies
@@ -15,7 +17,7 @@ Dependencies
 """
 
 from __future__ import annotations
-import cv2, math, json, pathlib
+import cv2, math, json, pathlib, time
 import mediapipe as mp
 import numpy as np
 import pyautogui
@@ -31,14 +33,15 @@ except ImportError:
 
 # ---------------------------------------------------------------------------
 # Configuration
-GRID_SIZE            = 4        # 4×4 calibration dots → 16 points
-SMOOTH_ALPHA         = 0.3      # Exponential smoothing for cursor
-CALIB_PATH           = pathlib.Path(__file__).with_name('gaze_calib_poly.json')
-POINT_RADIUS         = 10       # px radius of calibration dot
-PINCH_THRESHOLD_PX   = 40       # max thumb–index distance to count as pinch
-COOLDOWN_FRAMES      = 6        # frames to ignore after a click
-SCROLL_DEADBAND_PX   = 2        # ignore very tiny hand jitter while pinched
-SCROLL_SENSITIVITY   = 1.2      # multiplier → higher = faster scroll
+GRID_SIZE              = 4      # 4×4 calibration dots → 16 points
+SMOOTH_ALPHA           = 0.3    # Exponential smoothing for cursor
+CALIB_PATH             = pathlib.Path(__file__).with_name('gaze_calib_poly.json')
+POINT_RADIUS           = 10     # px radius of calibration dot
+PINCH_THRESHOLD_PX     = 40     # max thumb–index distance to count as pinch
+COOLDOWN_FRAMES        = 6      # frames to ignore after a click
+SCROLL_DEADBAND_PX     = 2      # ignore very tiny hand jitter while pinched
+SCROLL_SENSITIVITY     = 0.4    # ← lower = gentler scroll
+DOUBLE_PINCH_WINDOW_MS = 400    # two pinches inside this window → toggle control
 
 mp_face_mesh = mp.solutions.face_mesh
 mp_hands     = mp.solutions.hands
@@ -84,18 +87,20 @@ class EyeHandMouse:
             raise RuntimeError('Cannot open webcam')
 
         # --- calibration ---
-        self.theta     = self._load_calibration()
-        self.sx_filt   = self.sy_filt = None
-        self.targets   = [(self.screen_w*c/(GRID_SIZE-1), self.screen_h*r/(GRID_SIZE-1))
-                          for r in range(GRID_SIZE) for c in range(GRID_SIZE)]
+        self.theta       = self._load_calibration()
+        self.sx_filt     = self.sy_filt = None
+        self.targets     = [(self.screen_w*c/(GRID_SIZE-1), self.screen_h*r/(GRID_SIZE-1))
+                            for r in range(GRID_SIZE) for c in range(GRID_SIZE)]
         self.calib_src: list[tuple[float,float]] = []
         self.calib_dst: list[tuple[float,float]] = []
-        self.idx       = 0
+        self.idx         = 0
 
         # --- interaction state ---
-        self.cooldown       = 0   # pinch click cooldown (frames)
-        self.pinch_active   = False
-        self.scroll_prev_y  = None
+        self.cooldown        = 0      # pinch click cooldown (frames)
+        self.pinch_active    = False
+        self.scroll_prev_y   = None
+        self.last_pinch_time = 0.0    # for double‑pinch detection
+        self.control_enabled = True   # toggled by double‑pinch
 
         # --- CMD listener (optional) ---
         if HAS_PYNPUT:
@@ -137,7 +142,7 @@ class EyeHandMouse:
 
     # ------------- main loop ------------------------------
     def run(self):
-        print('SPACE on each red dot to calibrate.  Pinch thumb–index = click + scroll.')
+        print('SPACE on each red dot to calibrate.  Pinch = click / scroll.  Double‑pinch toggles control.')
         while True:
             ok, frame = self.cap.read()
             if not ok:
@@ -156,7 +161,7 @@ class EyeHandMouse:
                 ey = (lm[473].y + lm[468].y)/2
                 cv2.circle(frame, (int(ex*w), int(ey*h)), 3, (0,255,0), -1)
 
-                if self.theta is not None:
+                if self.theta is not None and self.control_enabled:
                     sx, sy = apply_poly(self.theta, ex, ey)
                     if self.sx_filt is None:
                         self.sx_filt, self.sy_filt = sx, sy
@@ -184,9 +189,19 @@ class EyeHandMouse:
                 if dist < PINCH_THRESHOLD_PX:               # ── PINCH DETECTED
                     if not self.pinch_active:
                         # ── pinch just started
+                        now = time.time()
+                        # Detect double‑pinch -------------------------------------------------
+                        if (now - self.last_pinch_time) * 1000 < DOUBLE_PINCH_WINDOW_MS:
+                            self.control_enabled = not self.control_enabled
+                            state = 'RESUMED' if self.control_enabled else 'PAUSED'
+                            print(f'▶ Control {state} by double‑pinch')
+                            self.last_pinch_time = 0  # reset to avoid triple triggers
+                        else:
+                            self.last_pinch_time = now
+                        # --------------------------------------------------------------------
                         self.pinch_active  = True
                         self.scroll_prev_y = l8.y * h
-                        if self.cooldown == 0:
+                        if self.control_enabled and self.cooldown == 0:
                             pyautogui.click()
                             self.cooldown = COOLDOWN_FRAMES
                             cv2.circle(frame, (int(l8.x*w), int(l8.y*h)), 20, (0,0,255), 2)
@@ -194,7 +209,7 @@ class EyeHandMouse:
                         # ── pinch held: compute scroll delta
                         cur_y = l8.y * h
                         dy    = self.scroll_prev_y - cur_y   # +ve → hand moved up
-                        if abs(dy) > SCROLL_DEADBAND_PX:
+                        if abs(dy) > SCROLL_DEADBAND_PX and self.control_enabled:
                             # pyautogui.scroll: +ve = up, −ve = down
                             pyautogui.scroll(int(dy * SCROLL_SENSITIVITY))
                             self.scroll_prev_y = cur_y
@@ -208,6 +223,11 @@ class EyeHandMouse:
                 tx, ty = self.targets[self.idx]
                 cv2.circle(frame, (int(tx/self.screen_w*w), int(ty/self.screen_h*h)),
                            POINT_RADIUS, (0,0,255), 2)
+
+            # ---- overlay state ----------------------------------------
+            if not self.control_enabled:
+                cv2.putText(frame, 'PAUSED – double‑pinch to resume', (20, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
 
             cv2.imshow('Eye & Hand Mouse', frame)
             key = cv2.waitKey(1) & 0xFF
