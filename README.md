@@ -2,7 +2,7 @@
 
 you must have python 3.12 version!
 ```
-(base) ➜  ~ source eye-mouse-env/bin/activate
+(base) ➜  ~ source ~/Desktop/eye-hand-env/bin/activate
 
 ((eye-mouse-env) ) (base) ➜  ~ python -V          # --> Python 3.12.x (arm64)
 Python 3.12.11
