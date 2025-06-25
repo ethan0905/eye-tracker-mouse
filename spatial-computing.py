@@ -2,10 +2,12 @@
 ================================================================
 • Eye tracking: MediaPipe FaceMesh iris → 2‑D quadratic mapping (16‑point grid).
 • Hand tracking: MediaPipe Hands detects thumb‑index **pinch**:
-    – **Single pinch** → mouse **click**.
+    – **Single pinch** → mouse **click**  (unless calibrating, see below).
     – **Pinch‑hold + hand move** → page **scroll** (now gentler).
     – **Double‑pinch** (two pinches within 0.4 s) → **toggle control** (pause / resume eye‑mouse);
       use this to hand control back to your normal mouse/trackpad.
+• **NEW**: face/eye **tracking dots** rendered in the webcam preview (subset of FaceMesh landmarks + iris centre).
+• **NEW**: During calibration, you can validate a dot with a **pinch** in addition to pressing **SPACE**.
 • NEW: full hand skeleton ("web") rendered on the webcam preview.
 • **Re‑calibrate gaze**: press **⌘ Command** (macOS) — or **R** as a fallback.
 • Press **Q** to quit.
@@ -38,10 +40,14 @@ SMOOTH_ALPHA           = 0.3    # Exponential smoothing for cursor
 CALIB_PATH             = pathlib.Path(__file__).with_name('gaze_calib_poly.json')
 POINT_RADIUS           = 10     # px radius of calibration dot
 PINCH_THRESHOLD_PX     = 40     # max thumb–index distance to count as pinch
-COOLDOWN_FRAMES        = 6      # frames to ignore after a click
+COOLDOWN_FRAMES        = 6      # frames to ignore after a click/pinch
 SCROLL_DEADBAND_PX     = 2      # ignore very tiny hand jitter while pinched
 SCROLL_SENSITIVITY     = 0.4    # ← lower = gentler scroll
 DOUBLE_PINCH_WINDOW_MS = 400    # two pinches inside this window → toggle control
+SHOW_FACE_DOTS         = True   # render tracking dots on face
+FACE_DOT_RADIUS        = 1      # px radius of each face dot
+FACE_DOT_COLOR         = (255, 0, 0)  # BGR – blue dots
+FACE_DOT_INDICES       = [1, 33, 133, 362, 263, 61, 291, 199]  # subset of FaceMesh indices
 
 mp_face_mesh = mp.solutions.face_mesh
 mp_hands     = mp.solutions.hands
@@ -101,6 +107,7 @@ class EyeHandMouse:
         self.scroll_prev_y   = None
         self.last_pinch_time = 0.0    # for double‑pinch detection
         self.control_enabled = True   # toggled by double‑pinch
+        self.eye_pos         = (0.0, 0.0)  # most recent eye centre (ex, ey)
 
         # --- CMD listener (optional) ---
         if HAS_PYNPUT:
@@ -142,7 +149,7 @@ class EyeHandMouse:
 
     # ------------- main loop ------------------------------
     def run(self):
-        print('SPACE on each red dot to calibrate.  Pinch = click / scroll.  Double‑pinch toggles control.')
+        print('SPACE or Pinch on each red dot to calibrate.  Pinch = click / scroll after calibration.  Double‑pinch toggles control.')
         while True:
             ok, frame = self.cap.read()
             if not ok:
@@ -157,10 +164,20 @@ class EyeHandMouse:
             # ---- gaze processing ---------------------------------------
             if face_res.multi_face_landmarks:
                 lm = face_res.multi_face_landmarks[0].landmark
+
+                # --- face / eye tracking dots ---------------------------
+                if SHOW_FACE_DOTS:
+                    for idx in FACE_DOT_INDICES:
+                        p = lm[idx]
+                        cv2.circle(frame, (int(p.x*w), int(p.y*h)), FACE_DOT_RADIUS, FACE_DOT_COLOR, -1)
+
+                # --- iris centre ---------------------------------------
                 ex = (lm[473].x + lm[468].x)/2
                 ey = (lm[473].y + lm[468].y)/2
+                self.eye_pos = (ex, ey)  # store for pinch‑calibration
                 cv2.circle(frame, (int(ex*w), int(ey*h)), 3, (0,255,0), -1)
 
+                # --- control cursor if calibrated ----------------------
                 if self.theta is not None and self.control_enabled:
                     sx, sy = apply_poly(self.theta, ex, ey)
                     if self.sx_filt is None:
@@ -191,7 +208,7 @@ class EyeHandMouse:
                         # ── pinch just started
                         now = time.time()
                         # Detect double‑pinch -------------------------------------------------
-                        if (now - self.last_pinch_time) * 1000 < DOUBLE_PINCH_WINDOW_MS:
+                        if (now - self.last_pinch_time) * 1000 < DOUBLE_PINCH_WINDOW_MS and self.theta is not None:
                             self.control_enabled = not self.control_enabled
                             state = 'RESUMED' if self.control_enabled else 'PAUSED'
                             print(f'▶ Control {state} by double‑pinch')
@@ -201,18 +218,36 @@ class EyeHandMouse:
                         # --------------------------------------------------------------------
                         self.pinch_active  = True
                         self.scroll_prev_y = l8.y * h
-                        if self.control_enabled and self.cooldown == 0:
+
+                        # ── CALIBRATION PINCH ----------------------------------------------
+                        if self.theta is None and self.idx < len(self.targets):
+                            # ensure we have a recent eye position
+                            ex, ey = self.eye_pos
+                            self.calib_src.append((ex, ey))
+                            self.calib_dst.append(self.targets[self.idx])
+                            # visual feedback: flash yellow circle on captured target
+                            tx, ty = self.targets[self.idx]
+                            cv2.circle(frame, (int(tx/self.screen_w*w), int(ty/self.screen_h*h)), POINT_RADIUS+4, (0,255,255), 2)
+                            self.idx += 1
+                            if self.idx == len(self.targets):
+                                self.theta = fit_poly(self.calib_src, self.calib_dst)
+                                self._save_calibration()
+                            self.cooldown = COOLDOWN_FRAMES
+                        # --------------------------------------------------------------------
+                        elif self.theta is not None and self.control_enabled and self.cooldown == 0:
+                            # regular click once calibrated
                             pyautogui.click()
                             self.cooldown = COOLDOWN_FRAMES
                             cv2.circle(frame, (int(l8.x*w), int(l8.y*h)), 20, (0,0,255), 2)
                     else:
-                        # ── pinch held: compute scroll delta
-                        cur_y = l8.y * h
-                        dy    = self.scroll_prev_y - cur_y   # +ve → hand moved up
-                        if abs(dy) > SCROLL_DEADBAND_PX and self.control_enabled:
-                            # pyautogui.scroll: +ve = up, −ve = down
-                            pyautogui.scroll(int(dy * SCROLL_SENSITIVITY))
-                            self.scroll_prev_y = cur_y
+                        # ── pinch held: compute scroll delta (only after calibration)
+                        if self.theta is not None and self.control_enabled:
+                            cur_y = l8.y * h
+                            dy    = self.scroll_prev_y - cur_y   # +ve → hand moved up
+                            if abs(dy) > SCROLL_DEADBAND_PX:
+                                # pyautogui.scroll: +ve = up, −ve = down
+                                pyautogui.scroll(int(dy * SCROLL_SENSITIVITY))
+                                self.scroll_prev_y = cur_y
                 else:
                     # ── pinch released
                     self.pinch_active  = False
@@ -225,9 +260,12 @@ class EyeHandMouse:
                            POINT_RADIUS, (0,0,255), 2)
 
             # ---- overlay state ----------------------------------------
-            if not self.control_enabled:
+            if not self.control_enabled and self.theta is not None:
                 cv2.putText(frame, 'PAUSED – double‑pinch to resume', (20, 40),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+            if self.theta is None:
+                cv2.putText(frame, 'CALIBRATION – pinch or SPACE on red dots', (20, 40),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
 
             cv2.imshow('Eye & Hand Mouse', frame)
             key = cv2.waitKey(1) & 0xFF
@@ -237,9 +275,9 @@ class EyeHandMouse:
                 print('↺ Recalibration started (R key)')
                 self._start_recalibration()
                 continue
-            # capture calibration sample
+            # capture calibration sample via SPACE
             if key == ord(' ') and self.theta is None and face_res.multi_face_landmarks:
-                self.calib_src.append((ex, ey))
+                self.calib_src.append(self.eye_pos)
                 self.calib_dst.append(self.targets[self.idx])
                 self.idx += 1
                 if self.idx == len(self.targets):
