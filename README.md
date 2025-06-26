@@ -1,4 +1,4 @@
-# eye-tracker-mouse
+# spatial computing brought to Apple computers
 
 you must have python 3.12 version!
 ```
