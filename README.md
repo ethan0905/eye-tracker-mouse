@@ -1,4 +1,5 @@
 # spatial computing brought to Apple computers
+please drop a star to support my work ⭐️
 
 you must have python 3.12 version!
 ```
